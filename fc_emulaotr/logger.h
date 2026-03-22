@@ -7,29 +7,37 @@
 #include <sstream>
 #include <fstream>
 
+
+
 namespace fc_emulator {
+//#undef _DEBUG
+
 // 日志文件的最大数量
 constexpr size_t kLogNumLimit = 5;
-#ifdef DEBUG
+#ifdef _DEBUG
+#define LOG_SET_LEVEL(level) fc_emulator::Logger::getInstance().setLogLevel((level))
+#define LOG_GET_LEVEL(level) fc_emulator::Logger::getInstance().getLogLevel((level))
 // ================ printf风格宏定义 ================
 // 这些宏使用起来就像printf一样，会自动添加文件名和行号
-#define LOG_DEBUG(format, ...) Logger::getInstance().debug(__FILE__, __LINE__, format, ##__VA_ARGS__)
-#define LOG_INFO(format, ...) Logger::getInstance().info(__FILE__, __LINE__, format, ##__VA_ARGS__)
-#define LOG_WARNING(format, ...) Logger::getInstance().warning(__FILE__, __LINE__, format, ##__VA_ARGS__)
-#define LOG_ERROR(format, ...) Logger::getInstance().error(__FILE__, __LINE__, format, ##__VA_ARGS__)
-#define LOG_FATAL(format, ...) Logger::getInstance().fatal(__FILE__, __LINE__, format, ##__VA_ARGS__)
+#define LOG_DEBUG(format, ...) fc_emulator::Logger::getInstance().debug(__FILE__, __LINE__, format, ##__VA_ARGS__)
+#define LOG_INFO(format, ...) fc_emulator::Logger::getInstance().info(__FILE__, __LINE__, format, ##__VA_ARGS__)
+#define LOG_WARNING(format, ...) fc_emulator::Logger::getInstance().warning(__FILE__, __LINE__, format, ##__VA_ARGS__)
+#define LOG_ERROR(format, ...) fc_emulator::Logger::getInstance().error(__FILE__, __LINE__, format, ##__VA_ARGS__)
+#define LOG_FATAL(format, ...) fc_emulator::Logger::getInstance().fatal(__FILE__, __LINE__, format, ##__VA_ARGS__)
 
 // ================ 流式日志宏 ================
 // 保留流式日志宏，类似cout的使用方式
-#define LOG_STREAM_DEBUG LogStream(LogLevel::LevelDebug, __FILE__, __LINE__)
-#define LOG_STREAM_INFO LogStream(LogLevel::LevelInfo, __FILE__, __LINE__)
-#define LOG_STREAM_WARNING LogStream(LogLevel::LevelWarning, __FILE__, __LINE__)
-#define LOG_STREAM_ERROR LogStream(LogLevel::LevelError, __FILE__, __LINE__)
-#define LOG_STREAM_FATAL LogStream(LogLevel::LevelFatal, __FILE__, __LINE__)
+#define LOG_STREAM_DEBUG fc_emulator::LogStream(fc_emulator::LogLevel::LevelDebug, __FILE__, __LINE__)
+#define LOG_STREAM_INFO fc_emulator::LogStream(fc_emulator::LogLevel::LevelInfo, __FILE__, __LINE__)
+#define LOG_STREAM_WARNING fc_emulator::LogStream(fc_emulator::LogLevel::LevelWarning, __FILE__, __LINE__)
+#define LOG_STREAM_ERROR fc_emulator::LogStream(fc_emulator::LogLevel::LevelError, __FILE__, __LINE__)
+#define LOG_STREAM_FATAL fc_emulator::LogStream(fc_emulator::LogLevel::LevelFatal, __FILE__, __LINE__)
 #else
 // 用于编译器优化，通常编译器会忽略 if (false) { ... }
 // 从而把整个 if 翻译为空，不消耗任何性能
 constexpr bool bDebug = false;
+#define LOG_SET_LEVEL(level)  
+#define LOG_GET_LEVEL(level)  
 // ================ printf风格宏定义 ================
 // 这些宏使用起来就像printf一样，会自动添加文件名和行号
 #define LOG_DEBUG(format, ...) 
@@ -40,11 +48,11 @@ constexpr bool bDebug = false;
 
 // ================ 流式日志宏 ================
 // 保留流式日志宏，类似cout的使用方式
-#define LOG_STREAM_DEBUG        if (bDebug) LogStreamVoid()
-#define LOG_STREAM_INFO         if (bDebug) LogStreamVoid()
-#define LOG_STREAM_WARNING      if (bDebug) LogStreamVoid()
-#define LOG_STREAM_ERROR        if (bDebug) LogStreamVoid()
-#define LOG_STREAM_FATAL        if (bDebug) LogStreamVoid()
+#define LOG_STREAM_DEBUG        if (bDebug) fc_emulator::LogStreamVoid()
+#define LOG_STREAM_INFO         if (bDebug) fc_emulator::LogStreamVoid()
+#define LOG_STREAM_WARNING      if (bDebug) fc_emulator::LogStreamVoid()
+#define LOG_STREAM_ERROR        if (bDebug) fc_emulator::LogStreamVoid()
+#define LOG_STREAM_FATAL        if (bDebug) fc_emulator::LogStreamVoid()
 #endif //DEBUG
 // 日志级别枚举
 enum class LogLevel {
@@ -68,6 +76,9 @@ public:
     // 禁止拷贝和赋值
     Logger(const Logger&) = delete;
     Logger& operator=(const Logger&) = delete;
+
+    void setLogLevel(LogLevel level) { level_ = level;  }
+    const LogLevel getLogLevel() const { return level_; }
 
     // 设置是否在控制台显示
     void setShowConsole(bool show);
@@ -124,7 +135,8 @@ private:
     bool showConsole_ = false;      // 是否在控制台显示
     bool showTimestamp_ = false;    // 是否显示时间戳
 
-    // 日志级别对应的字符串
+    // 日志级别
+    LogLevel level_;
     std::map<LogLevel, std::string> levelStrings_;
 };
 

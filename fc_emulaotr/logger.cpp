@@ -176,6 +176,7 @@ std::string Logger::extractFileName(const std::string& fullPath) {
 // 内部日志记录函数（带文件名和行号）
 void Logger::logInternal(LogLevel level, const std::string& message,
     const std::string& file, int line) {
+    if (level < level_) return;
     std::lock_guard<std::mutex> lock(logMutex_);
 
     // 提取短文件名
