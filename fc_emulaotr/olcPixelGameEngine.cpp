@@ -9,11 +9,15 @@
 #include "cpu.h"
 #include "ppu.h"
 #include "emulator.h"
-
+#include "logger.h"
 
 class FCDebugApp : public olc::PixelGameEngine {
 public:
-	FCDebugApp() { sAppName = "FC Emulator Debugger"; }
+	FCDebugApp() { 
+		sAppName = "FC Emulator Debugger";
+		LOG_SET_LEVEL(fc_emulator::LogLevel::LevelInfo);
+		bEmulationRun = true;
+	}
 
 	bool OnUserCreate() override {
 		// 加载 ROM（可以从命令行参数或固定路径）
@@ -66,6 +70,7 @@ public:
             }
         }
 	}
+
 	bool OnUserUpdate(float fElapsedTime) override {
         // 清屏
         Clear(olc::DARK_BLUE);
@@ -80,9 +85,16 @@ public:
             selectedPalette = (selectedPalette + 1) % 8;
         }
 
+		// FPS: 60
         if (bEmulationRun) {
-            emu.stepFrame();
+            if (fResidualTime > 0.0f)
+                fResidualTime -= fElapsedTime;
+            else {
+                fResidualTime += (1.0f / 60.0f) - fElapsedTime;
+				emu.stepFrame();
+            }
         }
+
 		// 处理手柄输入
 		HandleControllerInput();
 
@@ -114,6 +126,8 @@ public:
 private:
 	fc_emulator::Emulator emu;
 	bool bEmulationRun = false;
+    float fResidualTime = 0.0f;
+
 	uint8_t selectedPalette = 0;
 
 	// 辅助函数：格式化十六进制
@@ -226,8 +240,10 @@ private:
 
 int main() {
 	FCDebugApp app;
+	
 	// 窗口大小：左侧 256*2=512 像素显示画面，右侧留出 268 像素宽度用于调试信息
 	if (app.Construct(780, 480, 2, 2))  // 与示例类似 780x480
 		app.Start();
+	
 	return 0;
 }

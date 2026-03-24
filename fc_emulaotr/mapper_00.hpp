@@ -51,14 +51,15 @@ void mappingChrRomBanks(uint8_t* chrRomData, uint8_t szBanks) {
 }
 
 
-void save_state(std::vector<uint8_t>& out) const override {
+void saveState(const std::vector<uint8_t>& in) const override {
     // NROM没有状态需要保存
     assert(!"Save state is not supported!");
 }
 
-void load_state(const std::vector<uint8_t>& in) override {
+uint8_t* loadState() override {
     // NROM没有状态需要加载
     assert(!"Load state is not supported!");
+    return nullptr;
 }
 
 }; // class Mapper_00

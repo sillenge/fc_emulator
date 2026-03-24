@@ -66,8 +66,8 @@ public:
     virtual void tick(uint64_t cycles)  { assert(!"unsupported"); }
 
     // 保存状态
-    virtual void save_state(std::vector<uint8_t>& out) const = 0;
-    virtual void load_state(const std::vector<uint8_t>& in) = 0;
+    virtual void saveState(const std::vector<uint8_t>& in) const = 0;
+    virtual uint8_t* loadState() = 0;
     // 地址映射
 
     // ROM data 由 Cartridge 提供
@@ -75,6 +75,9 @@ public:
 	virtual void mappingChrRomBanks(uint8_t* chrRomData, uint8_t szBanks) = 0;
     // nametabaleData 由 PPU 提供，这里主要映射了VRAM
 	void MappingNametableBanks(uint8_t* nametableData);
+
+	inline uint8_t** getPrgBanks() { return prgBanks_; }
+	inline uint8_t** getChrBanks() { return chrBanks_; }
 
 protected:
     // 8k 每bank

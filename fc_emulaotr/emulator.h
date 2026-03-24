@@ -19,7 +19,6 @@ public:
 	bool insertCartridge(const std::string& filePath);
 
 	void reset();
-	void clock();
 	// 模拟一步（驱动 CPU 一次 + PPU 三次），返回 true 表示一帧已完成
 	bool stepFrame();
 	const void stepInstruction();

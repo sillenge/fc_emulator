@@ -2,6 +2,7 @@
 
 #include "ppu.h"
 #include "bus.h"
+#include "logger.h"
 
 namespace fc_emulator {
 
@@ -27,7 +28,7 @@ void PPU::reset() {
 	fineXScroll_ = 0x00;
     scanline_ = -1;
     cycle_ = 0;
-	renderCtx_ = { 0 };
+	renderCtx_.reset();
 	bFrameComplete_ = false;
 	nmiTriggered_ = false;
 	memset(palette_.data(), 0, palette_.size());
@@ -48,10 +49,6 @@ void PPU::clock() {
 		cycle_ = 1;
 	}
 
-	if (cycle_ == 0) {
-		renderCtx_.evaluateSprites(*this);
-	}
-
 	// 根据扫描线确定阶段
 	switch (getCurClockState()) {
 	case PPUClockState::PreRender:   
@@ -68,6 +65,25 @@ void PPU::clock() {
 		break;
 	}
 
+#ifdef _DEBUG
+{
+    LOG_STREAM_DEBUG << std::hex << std::uppercase << std::setfill('0')
+        << std::setw(2) << "scanline:" << (int)scanline_
+        << std::setw(2) << " cycle:" << (int)cycle_
+        << std::setw(2) << " ctrl:" << (int)ctrl_.reg
+        << std::setw(2) << " mask:" << (int)mask_.reg
+        << std::setw(2) << " status:" << (int)status_.reg
+        //<< std::setw(2) << " oamAddr:" << (int)oamAddr_
+        //<< std::setw(2) << " oamData:" << (int)oamData_
+        //<< std::setw(2) << " scroll:"	<< (int)scroll_
+        //<< std::setw(2) << " ppuAddr:" << (int)ppuAddr_
+        //<< std::setw(2) << " ppuData:" << (int)ppuData_
+        << std::setw(2) << " vramAddr:" << (int)vramAddr_.reg
+        << std::setw(2) << " tramAddr:" << (int)tramAddr_.reg
+        << std::setw(2) << " fineX:" << (int)fineXScroll_ << std::endl;
+}
+#endif // _DEBUG
+
 	// 像素合成（始终进行，但只在可见区域写入帧缓冲）
 	composePixel();
 
@@ -82,6 +98,10 @@ std::optional<FrameBuffer> PPU::getFrameBuffer() {
 	}
 	bFrameComplete_ = false;
 	return frameBuffer_;
+}
+
+void PPU::loadOMA(const uint8_t* oamBaseAddress) {
+	memcpy_s(oam_.data(), oam_.max_size(), oamBaseAddress, oam_.max_size());
 }
 
 // 注册回调函数，用于处理一帧准备好后的渲染事项
@@ -106,6 +126,7 @@ uint8_t PPU::cpuRead(uint16_t addr) {
 		data = status_.reg;
 		// 读取后清除 VBlank 状态
 		status_.vblank = 0;
+		//bFirstWrite = true;
 		break;
 	case PPURegister::OAM_ADDR:
 		// 只写寄存器
@@ -113,7 +134,7 @@ uint8_t PPU::cpuRead(uint16_t addr) {
 		break;
 	case PPURegister::OAM_DATA:
 		// 读写寄存器
-		data = oam_[oamAddr_];
+		data = oam_[oamAddr_++];
 		break;
 	case PPURegister::PPU_SCROLL:
 	case PPURegister::PPU_ADDR:
@@ -162,7 +183,7 @@ void PPU::cpuWrite(uint16_t addr, uint8_t data) {
 		break;
 	case PPURegister::OAM_DATA:
 		// 读写寄存器
-        oam_[oamAddr_] = data;
+        oam_[oamAddr_++] = data;
 		break;
 	case PPURegister::PPU_SCROLL:
 		// data 低3位是精调X，高5位是粗调X
@@ -280,9 +301,10 @@ olc::Sprite& PPU::GetPatternTable(uint8_t tableIndex, uint8_t paletteIdx) {
     // 图案表大小为 128x128 像素（ 每个 tile 8x8，共 16x16 个 tile ）
     static olc::Sprite sprite[2]{ {128, 128}, {128, 128} };
     uint16_t baseAddr = (tableIndex == 0) ? 0x0000 : 0x1000;
-
+	// 16*16 tile
     for (int ty = 0; ty < 16; ++ty) {
         for (int tx = 0; tx < 16; ++tx) {
+
             int tileId = ty * 16 + tx;
             // 每个 tile 占 16 字节（8 字节低位 + 8 字节高位）
             uint16_t tileAddr = baseAddr + tileId * 16;
@@ -306,82 +328,112 @@ olc::Sprite& PPU::GetPatternTable(uint8_t tableIndex, uint8_t paletteIdx) {
 
 // 预渲染周期
 void PPU::handlePreRenderLine() {
-    // 清除 VBlank
-    if (cycle_ == 1) {
-        status_.vblank = 0;
-        // 清除帧就绪标记，准备新一轮的渲染
-        bFrameComplete_ = false;
-    }
+	if (cycle_ == 1) {
+		// 清空状态
+		status_.vblank = 0;
+		status_.sprite_0_Hit = 0;
+		status_.spriteOverflow = 0;
+		bFrameComplete_ = false;
+
+		//// 清空精灵渲染槽
+		for (int i = 0; i < 8; i++) {
+			renderCtx_.spriteShiftersLower_[i] = 0;
+			renderCtx_.spriteShiftersUpper_[i] = 0;
+		}
+		renderCtx_.spriteCount_ = 0;
+	}
     // 取指周期（与可见行相同，但不输出像素）
     if ((cycle_ >= 2 && cycle_ < 258) || (cycle_ >= 321 && cycle_ < 338)) {
-        renderCtx_.updateShifters(*this);
+        renderCtx_.updateShifters();
         switch ((cycle_ - 1) & 0x7) {
         case 0:
-            renderCtx_.loadShifters();
-            renderCtx_.fetchTileId(*this);
+            renderCtx_.loadBackgroudShifters();
+            renderCtx_.fetchTileId();
             break;
-        case 2:	renderCtx_.fetchTileAttrib(*this);	break;
-        case 4: renderCtx_.fetchTileLsb(*this);		break;
-        case 6: renderCtx_.fetchTileMsb(*this);		break;
-        case 7: renderCtx_.incrementScrollX(*this); break;
+        case 2:	renderCtx_.fetchTileAttrib();	break;
+        case 4: renderCtx_.fetchTileLsb();		break;
+        case 6: renderCtx_.fetchTileMsb();		break;
+        case 7: renderCtx_.incrementScrollX(); break;
         default: break;
         }
     }
+	// 精灵移位器更新
+	if (mask_.showsSprites && (1 <= cycle_ && cycle_ < 258)) {
+		renderCtx_.updateSpriteShifter();
+	}
 
     // 周期 256：垂直滚动递增
     if (cycle_ == 256) {
-        renderCtx_.incrementScrollY(*this);
+        renderCtx_.incrementScrollY();
     }
 
     // 周期 257：加载移位器并水平地址传输
     if (cycle_ == 257) {
-        renderCtx_.loadShifters();
-        renderCtx_.transferAddressX(*this);
+        renderCtx_.loadBackgroudShifters();
+        renderCtx_.transferAddressX();
+		// 评估第 0 行精灵
+		renderCtx_.evaluateSprites(0);
     }
 
-    // 周期 338 和 340：空读取
-    if (cycle_ == 338 || cycle_ == 340) {
-        renderCtx_.fetchTileIdDummy(*this);
-    }
+    //// 周期 338 和 340：空读取
+    //if (cycle_ == 338) {
+    //    renderCtx_.fetchTileIdDummy();
+    //}
+
+	if (cycle_ == 340) {
+		renderCtx_.loadSpriteShifter();
+	}
 
     // 周期 280-305：垂直地址传输
     if (cycle_ >= 280 && cycle_ < 305) {
-        renderCtx_.transferAddressY(*this);
+        renderCtx_.transferAddressY();
     }
 }
 
 void PPU::handleVisibleLine() {
     // 取指周期
     if ((cycle_ >= 2 && cycle_ < 258) || (cycle_ >= 321 && cycle_ < 338)) {
-        renderCtx_.updateShifters(*this);
+        renderCtx_.updateShifters();
         switch ((cycle_ - 1) & 0x7) {
         case 0:
-            renderCtx_.loadShifters();
-            renderCtx_.fetchTileId(*this);
+            renderCtx_.loadBackgroudShifters();
+            renderCtx_.fetchTileId();
             break;
-        case 2:	renderCtx_.fetchTileAttrib(*this);	break;
-        case 4: renderCtx_.fetchTileLsb(*this);		break;
-        case 6: renderCtx_.fetchTileMsb(*this);		break;
-        case 7: renderCtx_.incrementScrollX(*this); break;
+        case 2:	renderCtx_.fetchTileAttrib();	break;
+        case 4: renderCtx_.fetchTileLsb();		break;
+        case 6: renderCtx_.fetchTileMsb();		break;
+        case 7: renderCtx_.incrementScrollX(); break;
         default: break;
         }
     }
 
+	// 精灵移位器更新
+	if (mask_.showsSprites && (1 <= cycle_ && cycle_ < 258)) {
+		renderCtx_.updateSpriteShifter();
+	}
+
     // 周期 256：垂直滚动递增
     if (cycle_ == 256) {
-        renderCtx_.incrementScrollY(*this);
+        renderCtx_.incrementScrollY();
     }
 
     // 周期 257：加载移位器并水平地址传输
     if (cycle_ == 257) {
-        renderCtx_.loadShifters();
-        renderCtx_.transferAddressX(*this);
+        renderCtx_.loadBackgroudShifters();
+        renderCtx_.transferAddressX();
+		// 评估下一行
+		renderCtx_.evaluateSprites(scanline_ + 1);
     }
 
-    // 周期 338 和 340：空读取
-    if (cycle_ == 338 || cycle_ == 340) {
-        renderCtx_.fetchTileIdDummy(*this);
-    }
+    //// 周期 338 和 340：空读取
+    //if (cycle_ == 338) {
+    //    renderCtx_.fetchTileIdDummy();
+    //}
+ 
+	// 加载精灵移位寄存器数据
+	if (cycle_ == 340) {
+		renderCtx_.loadSpriteShifter();
+	}
 }
 
 
@@ -421,21 +473,46 @@ void PPU::composePixel() {
     }
     bool bgOpaque = (bgColorIndex != 0);
 
-    // ----- 精灵混合 -----
-    int xPixel = cycle_ - 1;
-    SpriteBlendResult blend = renderCtx_.blendSprites(*this, xPixel, bgOpaque);
-	renderCtx_.checkSprite0Hit(*this, blend, bgOpaque);
+	// ---------- 精灵 ----------
+	uint8_t fgPalette = 0, fgColor = 0;
+	bool fgPriority = false;
+	bool showSprite = mask_.showsSprites && (cycle_ <= 8 ? mask_.showSpritesLeft : true);
+	if (showSprite) {
+		fgColor = renderCtx_.getForegroundPixel(fgPalette, fgPriority);
+	}
+	bool fgOpaque = (fgColor != 0);
 
-    // ----- 最终颜色 -----
-    uint8_t finalSelector = bgPaletteSelector;
-    uint8_t finalIndex = bgColorIndex;
-    if (blend.spriteUsed) {
-        finalSelector = blend.paletteSelector;
-        finalIndex = blend.colorIndex;
-    }
-
-    RGBA pixelColor = getColorFromPalette(finalSelector, finalIndex);
-    frameBuffer_[(scanline_ * kScreenWidth) + (cycle_ - 1)] = pixelColor;
+	// ---------- 合成 ----------
+	uint8_t finalPalette = 0;
+	uint8_t finalColor = 0;
+	do {
+		if (!bgOpaque && !fgOpaque) {
+			finalColor = 0;
+			finalPalette = 0;
+		}
+		else if (!bgOpaque && fgOpaque) {
+			finalColor = fgColor;
+			finalPalette = fgPalette;
+		}
+		else if (bgOpaque && !fgOpaque) {
+			finalColor = bgColorIndex;
+			finalPalette = bgPaletteSelector;
+		}
+		else {
+			if (fgPriority) {
+				finalColor = fgColor;
+				finalPalette = fgPalette;
+			}
+			else {
+				finalColor = bgColorIndex;
+				finalPalette = bgPaletteSelector;
+			}
+			renderCtx_.checkSpriteZeroHit(bgOpaque, fgOpaque);
+		}
+	} while (false);
+	// ---------- 写入帧缓冲 ----------
+	RGBA color = getColorFromPalette(finalPalette, finalColor);
+	frameBuffer_[(scanline_ * kScreenWidth) + (cycle_ - 1)] = color;
 }
 
 // 下一个时钟周期
@@ -454,6 +531,25 @@ void PPU::advanceCycle() {
     }
 }
 
+
+void PPU::PPURenderContext::reset() {
+	bgShifterPatternLower_ = 0;			// 背景图案低位移位寄存器
+	bgShifterPatternUpper_ = 0;			// 背景图案高位移位寄存器
+	bgShifterAttributeLower_ = 0;		// 背景属性低位移位寄存器
+	bgShifterAttributeUpper_ = 0;		// 背景属性低高移位寄存器
+	nextTileId_ = 0;						// 下一个tile ID，16*16个tile
+	nextTileAttribute_ = 0;				// 下一个tile 属性 （颜色选择子，可选4组调色板0-3 4-7 8-11 12-15）
+	nextTileLsb_ = 0;					// 下一个tile低位平面 Least Significant Bit plane
+	nextTileMsb_ = 0;					// 下一个tile高位平面 Most  Significant Bit plane
+	memset(lineSprites_, 0, sizeof(lineSprites_));	// 当前行可见精灵（最多8个）
+	memset(spriteShiftersLower_, 0, sizeof(spriteShiftersLower_));	// 每个精灵的低位平面移位器
+	memset(spriteShiftersUpper_, 0, sizeof(spriteShiftersUpper_));	// 每个精灵的高位平面移位器
+	memset(spriteXCounters_, 0, sizeof(spriteXCounters_));	// 每个精灵的 X 坐标计数器（模拟硬件递减）	
+	spriteCount_ = 0;					// 实际可见精灵数量
+	bSprite0HitPossible_ = false;     // 精灵零是否可能命中
+	bSprite0BeingRendered_ = false;   // 当前周期是否正在渲染精灵零
+}
+
 // 水平滚动
 // 参考：https://zhuanlan.zhihu.com/p/599870247 视窗位置的计算
 // 用于确认下一个pixel的位置，不需要对fineX进行自增，fineX被用作tile内的初始列偏移，像素点偏移通过位移寄存器实现
@@ -462,67 +558,67 @@ void PPU::advanceCycle() {
 // ==> C|CCCCCC D|BBBBBBB 此时渲染的是 BBBBBBB C，而CCCC是刷新的帧，刷新的 nametable_C 被渲染显示了，而D是新的列
 // A 和 B 是两个nametable，它们共存于内存之中，我们横向向右滚动时只需要将起始指针右移一个位即可
 // (同时，我们向右移动后，刚被移出屏幕的列就会被刷新，**但不在这个函数里实现**，C: 代表以tile为单位的一列被刷新了)
-void PPU::PPURenderContext::incrementScrollX(PPU& ppu) {
-	if (ppu.renderingEnabled()) {
+void PPU::PPURenderContext::incrementScrollX() {
+	if (ppu_.renderingEnabled()) {
 		// 0-31 tile 共计32个tile，coarseX=31时自增得 0
-		if (ppu.vramAddr_.coarseX < 31) {
-			ppu.vramAddr_.coarseX++;
+		if (ppu_.vramAddr_.coarseX < 31) {
+			ppu_.vramAddr_.coarseX++;
 		}
 		else {
-			ppu.vramAddr_.coarseX = 0;
-			ppu.vramAddr_.nametableX = (~ppu.vramAddr_.nametableX) & 1;
+			ppu_.vramAddr_.coarseX = 0;
+			ppu_.vramAddr_.nametableX = ~ppu_.vramAddr_.nametableX;
 		}
 		// 这种写法虽然看起来非常简洁高效，但如果出了BUG将非常难查
-		//ppu.vramAddr_.coarseX++;
-		//if (ppu.vramAddr_.coarseX == 0) {
-		//	ppu.vramAddr_.nametableX = (~ppu.vramAddr_.nametableX) & 1;
+		//ppu_.vramAddr_.coarseX++;
+		//if (ppu_.vramAddr_.coarseX == 0) {
+		//	ppu_.vramAddr_.nametableX = (~ppu_.vramAddr_.nametableX) & 1;
 		//}
 	}
 }
 
 // 垂直滚动
-void PPU::PPURenderContext::incrementScrollY(PPU& ppu) {
-	if (ppu.renderingEnabled()) {
-		if (ppu.vramAddr_.fineY < 7) {
-			ppu.vramAddr_.fineY++;
+void PPU::PPURenderContext::incrementScrollY() {
+	if (ppu_.renderingEnabled()) {
+		if (ppu_.vramAddr_.fineY < 7) {
+			ppu_.vramAddr_.fineY++;
 		}
 		else {
-			ppu.vramAddr_.fineY = 0;
-			if (ppu.vramAddr_.coarseY == 29) {
-				ppu.vramAddr_.coarseY = 0;
-				ppu.vramAddr_.nametableY = ~ppu.vramAddr_.nametableY & 1;
+			ppu_.vramAddr_.fineY = 0;
+			if (ppu_.vramAddr_.coarseY == 29) {
+				ppu_.vramAddr_.coarseY = 0;
+				ppu_.vramAddr_.nametableY = ~ppu_.vramAddr_.nametableY;
 			}
-			else if (ppu.vramAddr_.coarseY == 31) {
-				ppu.vramAddr_.coarseY = 0;
+			else if (ppu_.vramAddr_.coarseY == 31) {
+				ppu_.vramAddr_.coarseY = 0;
 			}
 			else {
-				ppu.vramAddr_.coarseY++;
+				ppu_.vramAddr_.coarseY++;
 			}
 		}
 	}
 }
 
 // 硬件换行时调用，载入预渲染的数据到vramAddr_里
-void PPU::PPURenderContext::transferAddressX(PPU& ppu) {
-	if (ppu.renderingEnabled()) {
-		ppu.vramAddr_.nametableX = ppu.tramAddr_.nametableX;
-		ppu.vramAddr_.coarseX = ppu.tramAddr_.coarseX;
+void PPU::PPURenderContext::transferAddressX() {
+	if (ppu_.renderingEnabled()) {
+		ppu_.vramAddr_.nametableX = ppu_.tramAddr_.nametableX;
+		ppu_.vramAddr_.coarseX = ppu_.tramAddr_.coarseX;
 	}
 }
 
 // 硬件换帧时调用，载入预渲染的数据到vramAddr_里
-void PPU::PPURenderContext::transferAddressY(PPU& ppu) {
-	if (ppu.renderingEnabled()) {
-		ppu.vramAddr_.fineY = ppu.tramAddr_.fineY;
-		ppu.vramAddr_.nametableY = ppu.tramAddr_.nametableY;
-		ppu.vramAddr_.coarseY = ppu.tramAddr_.coarseY;
+void PPU::PPURenderContext::transferAddressY() {
+	if (ppu_.renderingEnabled()) {
+		ppu_.vramAddr_.fineY = ppu_.tramAddr_.fineY;
+		ppu_.vramAddr_.nametableY = ppu_.tramAddr_.nametableY;
+		ppu_.vramAddr_.coarseY = ppu_.tramAddr_.coarseY;
 	}
 }
 
 
 // 移位寄存器现在包含两个 tile 的低位数据：高 8 位是旧 tile, 低 8 位是新 tile
 // 后续每个时钟周期左移一位，新 tile 的数据会逐渐移入高 8 位并输出，实现流水线式渲染
-void PPU::PPURenderContext::loadShifters() {
+void PPU::PPURenderContext::loadBackgroudShifters() {
 	// 移位寄存器现在包含两个 tile 的低位数据：高 8 位是旧 tile, 低 8 位是新 tile
 	// 后续每个时钟周期左移一位，新 tile 的数据会逐渐移入高 8 位并输出，实现流水线式渲染
 	bgShifterPatternLower_.lower = nextTileLsb_;
@@ -538,9 +634,10 @@ void PPU::PPURenderContext::loadShifters() {
 	bgShifterAttributeUpper_.lower = (nextTileAttribute_ & 0x02 ? 0xFF : 0x00);
 }
 
+
 // 每个时钟周期左移一位，新 tile 的数据会逐渐移入高 8 位并输出，实现流水线式渲染
-void PPU::PPURenderContext::updateShifters(const PPU& ppu) {
-	if (ppu.mask_.showBackground) {
+void PPU::PPURenderContext::updateShifters() {
+	if (ppu_.mask_.showBackground) {
 		bgShifterPatternLower_.data <<= 1;
 		bgShifterPatternUpper_.data <<= 1;
 		bgShifterAttributeLower_.data <<= 1;
@@ -549,111 +646,153 @@ void PPU::PPURenderContext::updateShifters(const PPU& ppu) {
 }
 
 // 读下一个tile的索引
-void PPU::PPURenderContext::fetchTileId(PPU& ppu) {
-	nextTileId = ppu.bus_->PPURead(0x2000 | (ppu.vramAddr_.reg & 0x0FFF));
+void PPU::PPURenderContext::fetchTileId() {
+	nextTileId_ = ppu_.bus_->PPURead(0x2000 | (ppu_.vramAddr_.reg & 0x0FFF));
 }
 
 // 读一次VRAM，浪费一下时间，保持时序上的正确
-void PPU::PPURenderContext::fetchTileIdDummy(PPU& ppu) {
-	ppu.bus_->PPURead(0x2000 | (ppu.vramAddr_.reg & 0x0FFF));
+void PPU::PPURenderContext::fetchTileIdDummy() {
+	ppu_.bus_->PPURead(0x2000 | (ppu_.vramAddr_.reg & 0x0FFF));
 }
 
 
-void PPU::PPURenderContext::evaluateSprites(PPU& ppu)
-{
-    ppu.renderCtx_.lineSpriteCount = 0;
-    ppu.renderCtx_.overflowFlag = false;
 
-    int height = ppu.ctrl_.spriteSize ? 16 : 8;
+void PPU::PPURenderContext::evaluateSprites(int nextScanline) {
+	clearSpriteStateForLine();
 
-    for (int i = 0; i < 64; ++i) {
-        uint8_t y = ppu.oam_[i * 4 + 0];
-        uint8_t tile = ppu.oam_[i * 4 + 1];
-        uint8_t attr = ppu.oam_[i * 4 + 2];
-        uint8_t x = ppu.oam_[i * 4 + 3];
+	for (uint8_t i = 0; i < 64; ++i) {
+		const SpriteEntry* entry = reinterpret_cast<SpriteEntry*>(&ppu_.oam_[i * 4]);
+		if (isSpriteVisible(*entry, nextScanline)) {
+			addSpriteToLine(*entry, i);
+		}
+	}
 
-        // 判断是否在当前扫描线内（scanline_ + 1 与 Y 比较）
-        if (ppu.scanline_ + 1 < y || ppu.scanline_ + 1 >= y + height) continue;
+	if (spriteCount_ > 8) {
+		ppu_.status_.spriteOverflow = 1;
+		spriteCount_ = 8;
+	}
+}
 
-        if (ppu.renderCtx_.lineSpriteCount == 8) {
-            ppu.renderCtx_.overflowFlag = true;
-            continue;
-        }
-
-        // 计算行内偏移（考虑垂直翻转）
-        int row = (ppu.scanline_ + 1) - y;
-        if (attr & 0x80) row = (height - 1) - row;
-
-        uint8_t actualTile = tile;
-        uint8_t rowInTile = row;
-        if (ppu.ctrl_.spriteSize) { // 8x16 模式
-            actualTile = tile & 0xFE;
-            if (row >= 8) {
-                actualTile |= 1;
-                rowInTile = row - 8;
-            }
-        }
-
-        auto& ls = ppu.renderCtx_.lineSprites[ppu.renderCtx_.lineSpriteCount];
-        ls.tileIndex = actualTile;
-        ls.rowInTile = rowInTile;
-        ls.x = x;
-        ls.palette = attr & 0x03;
-        ls.hFlip = (attr & 0x40) != 0;
-        ls.priority = (attr & 0x20) != 0;
-        ls.oamIndex = i;
-        ppu.renderCtx_.lineSpriteCount++;
-    }
-
-	ppu.status_.spriteOverflow = ppu.renderCtx_.overflowFlag ? 1 : 0;
+void PPU::PPURenderContext::clearSpriteStateForLine() {
+	spriteCount_ = 0;
+	bSprite0HitPossible_ = false;
+	ppu_.status_.spriteOverflow = 0;
 }
 
 
-uint8_t PPU::PPURenderContext::fetchSpritePixel(PPU& ppu, const LineSprite& sprite, int offsetX) {
-    if (offsetX < 0 || offsetX >= 8) return 0;
-    if (sprite.hFlip) offsetX = 7 - offsetX;
-
-    uint16_t tileAddr = (ppu.ctrl_.spriteTable << 12) + (sprite.tileIndex << 4) + sprite.rowInTile;
-    uint8_t lsb = ppu.bus_->PPURead(tileAddr);
-    uint8_t msb = ppu.bus_->PPURead(tileAddr + 8);
-
-    uint8_t bit = 7 - offsetX;
-    return ((lsb >> bit) & 1) | (((msb >> bit) & 1) << 1);
+bool PPU::PPURenderContext::isSpriteVisible(const SpriteEntry& sprite, int scanline) const {
+	int diff = scanline - sprite.y;
+	int height = ppu_.ctrl_.spriteSize ? 16 : 8;
+	return (diff >= 0 && diff < height);
 }
 
 
-fc_emulator::SpriteBlendResult PPU::PPURenderContext::blendSprites(PPU& ppu, int x, bool bgOpaque) {
-    SpriteBlendResult result = { false, 0, 0, -1 };
-
-    for (int i = 0; i < ppu.renderCtx_.lineSpriteCount; ++i) {
-        const auto& ls = ppu.renderCtx_.lineSprites[i];
-        if (x < ls.x || x >= ls.x + 8) continue;
-
-        int offsetX = x - ls.x;
-        uint8_t pixel = fetchSpritePixel(ppu, ls, offsetX);
-        if (pixel == 0) continue; // 透明
-
-        // 优先级判断
-        if (ls.priority && bgOpaque) {
-            // 背景后且背景不透明 → 显示背景，不使用该精灵
-            continue;
-        }
-
-        // 该精灵被采用
-        result.spriteUsed = true;
-        result.paletteSelector = ls.palette;
-        result.colorIndex = pixel;
-        result.oamIndex = ls.oamIndex;
-        break;
-    }
-    return result;
+void PPU::PPURenderContext::addSpriteToLine(const SpriteEntry& sprite, uint8_t oamIndex) {
+	if (spriteCount_ < 8) {
+		lineSprites_[spriteCount_] = sprite;
+		spriteXCounters_[spriteCount_] = sprite.x;
+		if (oamIndex == 0) bSprite0HitPossible_ = true;
+		spriteCount_++;
+	}
 }
 
 
-void PPU::PPURenderContext::checkSprite0Hit(PPU& ppu, const SpriteBlendResult& result, bool bgOpaque) {
-    if (result.spriteUsed && result.oamIndex == 0 && bgOpaque) {
-        ppu.status_.sprite_0_Hit = 1;
-    }
+void PPU::PPURenderContext::loadSpriteShifter() {
+	for (uint8_t i = 0; i < spriteCount_; ++i) {
+		const SpriteEntry& sprite = lineSprites_[i];
+		int row = ppu_.scanline_ - sprite.y;
+		int height = ppu_.ctrl_.spriteSize ? 16 : 8;
+		if (sprite.attr & 0x80) row = height - 1 - row; // 垂直翻转
+
+		uint8_t lo, hi;
+		fetchSpritePattern(sprite, row, lo, hi);
+
+		spriteShiftersLower_[i] = lo;
+		spriteShiftersUpper_[i] = hi;
+	}
+	
+}
+
+
+
+void PPU::PPURenderContext::updateSpriteShifter() {
+	for (int i = 0; i < spriteCount_; ++i) {
+		if (spriteXCounters_[i] > 0) {
+			spriteXCounters_[i]--;
+		}
+		else {
+			spriteShiftersLower_[i] <<= 1;
+			spriteShiftersUpper_[i] <<= 1;
+		}
+	}
+}
+
+void PPU::PPURenderContext::fetchSpritePattern(const SpriteEntry& sprite, int row, uint8_t& lo, uint8_t& hi) {
+	uint16_t addrLo, addrHi;
+
+	if (!ppu_.ctrl_.spriteSize) {
+		// 8x8 模式
+		addrLo = (ppu_.ctrl_.spriteTable << 12) | (sprite.id << 4) | row;
+		addrHi = addrLo + 8;
+	}
+	else {
+		// 8x16 模式
+		uint16_t table = (sprite.id & 0x01) << 12;
+		uint8_t tile = sprite.id & 0xFE;
+		if (row >= 8) {
+			tile++;
+			row -= 8;
+		}
+		addrLo = table | (tile << 4) | row;
+		addrHi = addrLo + 8;
+	}
+
+	lo = ppu_.bus_->PPURead(addrLo);
+	hi = ppu_.bus_->PPURead(addrHi);
+
+	// 水平翻转
+	if (sprite.attr & 0x40) {
+		auto flip = [](uint8_t b) -> uint8_t {
+			b = (b & 0xF0) >> 4 | (b & 0x0F) << 4;
+			b = (b & 0xCC) >> 2 | (b & 0x33) << 2;
+			b = (b & 0xAA) >> 1 | (b & 0x55) << 1;
+			return b;
+			};
+		lo = flip(lo);
+		hi = flip(hi);
+	}
+}
+
+
+uint8_t PPU::PPURenderContext::getForegroundPixel(uint8_t& outPalette, bool& outPriority) {
+	for (uint8_t i = 0; i < spriteCount_; ++i) {
+		if (spriteXCounters_[i] != 0) continue;
+
+		uint8_t lo = (spriteShiftersLower_[i] & 0x80) ? 1 : 0;
+		uint8_t hi = (spriteShiftersUpper_[i] & 0x80) ? 1 : 0;
+		uint8_t pixel = (hi << 1) | lo;
+		if (pixel != 0) {
+			outPalette = (lineSprites_[i].attr & 0x03) + 0x04;
+			outPriority = (lineSprites_[i].attr & 0x20) == 0;
+			if (i == 0) bSprite0BeingRendered_ = true;
+			return pixel;
+		}
+	}
+	return 0;
+}
+
+
+void PPU::PPURenderContext::checkSpriteZeroHit(bool bgOpaque, bool fgOpaque) {
+	if (!bSprite0HitPossible_) return;
+	if (!bSprite0BeingRendered_) return;
+	if (!(ppu_.mask_.showBackground && ppu_.mask_.showsSprites)) return;
+	if (!(bgOpaque && fgOpaque)) return;
+
+	bool leftEdge = (ppu_.cycle_ >= 9 && ppu_.cycle_ < 258);
+	bool leftMask = ppu_.mask_.showBackgroundLeft || ppu_.mask_.showSpritesLeft;
+	if (leftEdge || !leftMask) {
+		ppu_.status_.sprite_0_Hit = 1;
+	}
 }
 
 // 由于一个attribute需要管理4*4个tile，暂且称为 block(4*4 tile)
@@ -662,35 +801,35 @@ void PPU::PPURenderContext::checkSprite0Hit(PPU& ppu, const SpriteBlendResult& r
 // 所以一个属性选择子uint8_t可以被切成四瓣使用
 // 四瓣的每一份可以一个四色的调色板使用（0-3 4-7 8-11 12-15）
 // 这个后续会被loadShifters扩散到一个位移流水寄存器里
-void PPU::PPURenderContext::fetchTileAttrib(PPU& ppu) {
+void PPU::PPURenderContext::fetchTileAttrib() {
 	uint16_t addr = kAddrBaseAttribute
-		| (ppu.vramAddr_.nametableY << 11)
-		| (ppu.vramAddr_.nametableX << 10)
-		| ((ppu.vramAddr_.coarseY >> 2) << 3)
-		| (ppu.vramAddr_.coarseX >> 2);
-	nextTileAttribute_ = ppu.bus_->PPURead(addr);
+		| (ppu_.vramAddr_.nametableY << 11)
+		| (ppu_.vramAddr_.nametableX << 10)
+		| ((ppu_.vramAddr_.coarseY >> 2) << 3)
+		| (ppu_.vramAddr_.coarseX >> 2);
+	nextTileAttribute_ = ppu_.bus_->PPURead(addr);
 	
 	// 判断当前 tile 位于块的上半部分（0）还是下半部分（1）
-	if (ppu.vramAddr_.coarseY & 0x02) nextTileAttribute_ >>= 4;
+	if (ppu_.vramAddr_.coarseY & 0x02) nextTileAttribute_ >>= 4;
 	// 判断当前 tile 位于块的左半部分（0）还是右半部分（1）
-	if (ppu.vramAddr_.coarseX & 0x02) nextTileAttribute_ >>= 2;
+	if (ppu_.vramAddr_.coarseX & 0x02) nextTileAttribute_ >>= 2;
 	nextTileAttribute_ &= 0x03;
 }
 // 每个 tile 的一行 占 16 字节，8 字节低位 + 8 字节高位
 // 一高一低的组合，刚好可以选一个四色调色盘里的四种颜色 （0 1 2 3）
 // attribute | (Lsb | Msb)正好可以选出一个颜色
-void PPU::PPURenderContext::fetchTileLsb(PPU& ppu) {
-	uint16_t addr = (ppu.ctrl_.backgroundTable << 12) // 0x0000 或 0x1000
-		+ ((uint16_t)nextTileId << 4) //定位到该 tile 在图案表中的起始位置
-		+ ppu.vramAddr_.fineY; //加上当前行偏移（0~7），得到该 tile 当前行的低位字节地址
-	nextTileLsb_ = ppu.bus_->PPURead(addr);
+void PPU::PPURenderContext::fetchTileLsb() {
+	uint16_t addr = (ppu_.ctrl_.backgroundTable << 12) // 0x0000 或 0x1000
+		+ ((uint16_t)nextTileId_ << 4) //定位到该 tile 在图案表中的起始位置
+		+ ppu_.vramAddr_.fineY; //加上当前行偏移（0~7），得到该 tile 当前行的低位字节地址
+	nextTileLsb_ = ppu_.bus_->PPURead(addr);
 }
 
-void PPU::PPURenderContext::fetchTileMsb(PPU& ppu) {
-	uint16_t addr = (ppu.ctrl_.backgroundTable << 12) 
-		+ ((uint16_t)nextTileId << 4)	
-		+ ppu.vramAddr_.fineY + 8; // +8跳过nextTileLsb_
-	nextTileMsb_ = ppu.bus_->PPURead(addr);
+void PPU::PPURenderContext::fetchTileMsb() {
+	uint16_t addr = (ppu_.ctrl_.backgroundTable << 12) 
+		+ ((uint16_t)nextTileId_ << 4)	
+		+ ppu_.vramAddr_.fineY + 8; // +8跳过nextTileLsb_
+	nextTileMsb_ = ppu_.bus_->PPURead(addr);
 }
 
 

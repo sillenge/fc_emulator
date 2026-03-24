@@ -97,6 +97,7 @@ union Uint8x2 {
 	};
 	uint16_t data;
 
+	Uint8x2() = default;
 	Uint8x2(uint16_t data) : data(data) {}
 };
 
@@ -111,21 +112,12 @@ union RGBA {
 };
 using FrameBuffer = std::array<RGBA, kScreenWidth* kScreenHeight>;
 
-struct LineSprite {
-	uint8_t tileIndex;   // 实际使用的图块索引（8x16模式下可能是偶数或奇数）
-	uint8_t rowInTile;   // 在当前 tile 内的行偏移（0-7）
-	uint8_t x;           // 精灵 X 坐标
-	uint8_t palette;     // 调色板索引（0-3）
-	bool hFlip;          // 水平翻转
-	bool priority;       // 优先级（0=前景，1=背景后）
-	uint8_t oamIndex;    // 原始 OAM 索引（用于精灵0碰撞）
-};
-
-struct SpriteBlendResult {
-    bool spriteUsed;
-    uint8_t paletteSelector;
-    uint8_t colorIndex;
-    int oamIndex;  // 最终使用的精灵的 OAM 索引，用于碰撞检测
+// 精灵属性条目（4字节）
+struct SpriteEntry {
+	uint8_t y;      // Y 坐标
+	uint8_t id;     // 图块索引
+	uint8_t attr;   // 属性（调色板、优先级、翻转标志）
+	uint8_t x;      // X 坐标
 };
 
 enum class PPUClockState {
@@ -142,9 +134,11 @@ using OAMMemory = std::array<uint8_t, 256>;
 // 显存（2KB，CPU通过PPU访问，用于名称表和属性表）
 using VRAM = std::array<uint8_t, 2048>;
 
+
+
 class PPU {
 public:
-	//PPU() = default;
+	PPU() : renderCtx_(*this) { };
 	//~PPU() = default;
 
 	// 重置
@@ -177,6 +171,35 @@ public:
 	olc::Sprite& GetPatternTable(uint8_t tableIndex, uint8_t paletteIdx);
 	std::optional<FrameBuffer> getFrameBuffer();
 
+
+	void loadOMA(const uint8_t* oamBaseAddress);
+private:
+	// 总线指针
+	Bus* bus_;
+
+	// 内部寄存器
+	PPUCtrl  ctrl_;        // $2000
+	PPUMask  mask_;        // $2001
+	PPUStatus status_;     // $2002
+	uint8_t  oamAddr_;     // $2003  OAM地址（写）
+	uint8_t  oamData_;     // $2004  OAM数据（读写）
+	uint8_t  scroll_;      // $2005  (双缓冲，需要内部暂存)
+	uint16_t ppuAddr_;     // $2006  VRAM地址（写两次）
+	uint8_t  ppuData_;     // $2007  VRAM数据（读写）
+
+	// 辅助寄存器
+	//uint8_t ppuLatchData_; // $2007  VRAM数据缓存，当读取非调色板数据时，预读一个数据存储
+	bool     bFirstWrite;  // $2005/$2006写入切换标志，双写寄存器第一次写入
+	uint8_t  ppuDataBuffer_; // $2007  VRAM数据缓存，当读取非调色板数据时，预读一个数据存储
+	// 内部地址寄存器（v, t, x, w 等用于精细滚动）
+	VRAMAddr vramAddr_;      // 当前VRAM地址（v）
+	VRAMAddr tramAddr_;      // 临时VRAM地址（t）
+	uint8_t  fineXScroll_;   // 精细X滚动（x）
+	// 内存
+	PaletteRAM palette_;     // 调色板内存（0x3F00-0x3F1F(32字节)）
+	OAMMemory  oam_;         // OAM内存（0x00-0xFF(256字节)）
+	VRAM       vram_;        // 2KB VRAM（名称表和属性表）
+
 private:
 	// -----------------渲染相关---------------------
 	bool renderingEnabled() const;
@@ -190,90 +213,78 @@ private:
 
 	void composePixel();
 	void advanceCycle();
-private:
-	// 内部寄存器
-	PPUCtrl  ctrl_;        // $2000
-	PPUMask  mask_;        // $2001
-	PPUStatus status_;     // $2002
-	uint8_t  oamAddr_;     // $2003  OAM地址（写）
-	uint8_t  oamData_;     // $2004  OAM数据（读写）
-	uint8_t  scroll_;      // $2005  (双缓冲，需要内部暂存)
-	uint16_t ppuAddr_;     // $2006  VRAM地址（写两次）
-	uint8_t  ppuData_;     // $2007  VRAM数据（读写）
-	// 辅助寄存器
-	//uint8_t ppuLatchData_; // $2007  VRAM数据缓存，当读取非调色板数据时，预读一个数据存储
-	bool     bFirstWrite;  // $2005/$2006写入切换标志，双写寄存器第一次写入
-	uint8_t  ppuDataBuffer_; // $2007  VRAM数据缓存，当读取非调色板数据时，预读一个数据存储
 
-	// 内部地址寄存器（v, t, x, w 等用于精细滚动）
-	VRAMAddr vramAddr_;      // 当前VRAM地址（v）
-	VRAMAddr tramAddr_;      // 临时VRAM地址（t）
-	uint8_t  fineXScroll_;   // 精细X滚动（x）
-
-	// 内存
-	PaletteRAM palette_;     // 调色板内存（0x3F00-0x3F1F(32字节)）
-	OAMMemory  oam_;         // OAM内存（0x00-0xFF(256字节)）
-	VRAM       vram_;        // 2KB VRAM（名称表和属性表）
-
-	
-private:
-	// 渲染相关
 	static constexpr int SCREEN_WIDTH = 256;
 	static constexpr int SCREEN_HEIGHT = 240;
 	FrameBuffer frameBuffer_; // 32位ARGB像素
-
 	// 扫描线/周期计数器（NTSC制式：262扫描线，每线341周期）
 	int scanline_;					// 当前扫描线（0-261，其中0-239为可见，240-260为垂直空白，261为预渲染）
 	int cycle_;						// 当前周期（0-340）
+
 	struct PPURenderContext {
+		PPURenderContext() = delete;
+		PPURenderContext(PPU& ppu) : ppu_(ppu) { reset(); }
+
+		void reset();
+
+	private:
+		PPU& ppu_;
+
 	public:	 // 背景
 		// 背景移位寄存器（16位，高8位为当前，低8位为下一个）
-		Uint8x2 bgShifterPatternLower_ = 0;			// 背景图案低位移位寄存器
-		Uint8x2 bgShifterPatternUpper_ = 0;			// 背景图案高位移位寄存器
-		Uint8x2 bgShifterAttributeLower_ = 0;		// 背景属性低位移位寄存器
-		Uint8x2 bgShifterAttributeUpper_ = 0;		// 背景属性低高移位寄存器
+		Uint8x2 bgShifterPatternLower_;			// 背景图案低位移位寄存器
+		Uint8x2 bgShifterPatternUpper_;			// 背景图案高位移位寄存器
+		Uint8x2 bgShifterAttributeLower_;		// 背景属性低位移位寄存器
+		Uint8x2 bgShifterAttributeUpper_;		// 背景属性低高移位寄存器
 
 		// 当前正在获取的下一个tile数据
-		uint8_t nextTileId = 0;						// 下一个tile ID，16*16个tile
-		uint8_t nextTileAttribute_ = 0;				// 下一个tile 属性 （颜色选择子，可选4组调色板0-3 4-7 8-11 12-15）
-		uint8_t nextTileLsb_ = 0;					// 下一个tile低位平面 Least Significant Bit plane
-		uint8_t nextTileMsb_ = 0;					// 下一个tile高位平面 Most  Significant Bit plane
+		uint8_t nextTileId_;						// 下一个tile ID，16*16个tile
+		uint8_t nextTileAttribute_;				// 下一个tile 属性 （颜色选择子，可选4组调色板0-3 4-7 8-11 12-15）
+		uint8_t nextTileLsb_;					// 下一个tile低位平面 Least Significant Bit plane
+		uint8_t nextTileMsb_;					// 下一个tile高位平面 Most  Significant Bit plane
 
 		// 辅助函数（可以直接操作成员）
-		void incrementScrollX(PPU& ppu);
-		void incrementScrollY(PPU& ppu);
-		void transferAddressX(PPU& ppu);
-		void transferAddressY(PPU& ppu);
-		void loadShifters();
-		void updateShifters(const PPU& ppu);
+		void incrementScrollX();
+		void incrementScrollY();
+		void transferAddressX();
+		void transferAddressY();
+		void loadBackgroudShifters();
+		void updateShifters();
 		// 取指相关函数需要访问PPU内存，可以传引用或使用函数对象
-		void fetchTileId(PPU& ppu);
-		void fetchTileAttrib(PPU& ppu);
-		void fetchTileLsb(PPU& ppu);
-		void fetchTileMsb(PPU& ppu);
-		void fetchTileIdDummy(PPU& ppu);
+		void fetchTileId();
+		void fetchTileAttrib();
+		void fetchTileLsb();
+		void fetchTileMsb();
+		void fetchTileIdDummy();
 
 	public: // 精灵
-        LineSprite lineSprites[8];
-        int lineSpriteCount;     // 当前行有效精灵数量
-        bool overflowFlag;       // 本行精灵溢出标志（用于设置 $2002 bit5）
+		SpriteEntry lineSprites_[8];			// 当前行可见精灵（最多8个）
+		uint8_t spriteShiftersLower_[8];		// 每个精灵的低位平面移位器
+		uint8_t spriteShiftersUpper_[8];		// 每个精灵的高位平面移位器
+		uint8_t spriteXCounters_[8];			// 每个精灵的 X 坐标计数器（模拟硬件递减）
+		uint8_t spriteCount_ = 0;					// 实际可见精灵数量
+		bool bSprite0HitPossible_;     // 精灵零是否可能命中
+		bool bSprite0BeingRendered_;   // 当前周期是否正在渲染精灵零
 
-		void evaluateSprites(PPU& ppu);
-		uint8_t fetchSpritePixel(PPU& ppu, const LineSprite& sprite, int offsetX);
-		SpriteBlendResult blendSprites(PPU& ppu, int x, bool bgOpaque);
-		void checkSprite0Hit(PPU& ppu, const SpriteBlendResult& result, bool bgOpaque);
-
+		// 精灵评估
+		void evaluateSprites(int nextScanline);
+		void clearSpriteStateForLine();                      // 重置精灵行状态
+		bool isSpriteVisible(const SpriteEntry& sprite, int scanline) const; // 判断精灵是否可见
+		void addSpriteToLine(const SpriteEntry& sprite, uint8_t oamIndex);   // 将精灵添加到当前行
+		// 精灵数据加载
+		void loadSpriteShifter();         // 为单个精灵加载移位器
+		void updateSpriteShifter();		  // 精灵移位器更新
+		void fetchSpritePattern(const SpriteEntry& sprite, int row, uint8_t& lo, uint8_t& hi); // 读取并翻转图案
+		// 精灵合成
+		uint8_t getForegroundPixel(uint8_t& outPalette, bool& outPriority); // 获取当前像素的前景信息
+		void checkSpriteZeroHit(bool bgOpaque, bool fgOpaque);              // 精灵零命中检测
     } renderCtx_;
+
 
     bool bFrameComplete_;
     FnCallback fnFrameCallback_;
     bool nmiTriggered_;
 
-private:
-	// 总线指针
-	Bus* bus_;
-
-private:
 	// PPU硬编码64色调色板，其中有54中颜色，包括48种彩色和4种灰阶
 	static constexpr RGBA kBasePalette_[64] = { 
 		{ 0x7F, 0x7F, 0x7F, 0xFF }, { 0x20, 0x00, 0xB0, 0xFF }, { 0x28, 0x00, 0xB8, 0xFF }, { 0x60, 0x10, 0xA0, 0xFF },

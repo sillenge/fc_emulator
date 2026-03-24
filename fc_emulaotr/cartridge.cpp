@@ -141,8 +141,8 @@ bool Cartridge::parseHeader(const std::vector<uint8_t>& data) {
 
     // todo 初始化PRG-RAM （暂不支持）
 
-    LOG_STREAM_INFO << "ROM加载成功: PRG=" << header_.prgRomBanks16k << "x16KB, "
-        << "CHR=" << header_.chrRomBanks8k << "x8KB, "
+    LOG_STREAM_INFO << "ROM加载成功: PRG=" << (int)header_.prgRomBanks16k << "x16KB, "
+        << "CHR=" << (int)header_.chrRomBanks8k << "x8KB, "
         << "Mapper=" << static_cast<int>(mapperId_) << std::endl;
 
     return true;

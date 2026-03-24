@@ -96,11 +96,12 @@ void CPU::nmi() {
 // 时钟周期
 void CPU::clock() {
     if (cycles_ == 0) {
-        static auto mapAsm = disassemble(0x8000, 0xFFFF);
-
-        LOG_STREAM_DEBUG << (mapAsm.find(regPC_) == mapAsm.end() ? "" : mapAsm[regPC_])
-        << "" << logRegs() << std::endl;
-
+#ifdef _DEBUG
+		static auto mapAsm = disassemble(0x8000, 0xFFFF);
+		LOG_STREAM_DEBUG << (mapAsm.find(regPC_) == mapAsm.end() ? "" : mapAsm[regPC_])
+			<< "" << logRegs() << std::endl;
+#endif // DEBUG
+        
         // 读取操作码
         opcode_ = read(regPC_++);
 

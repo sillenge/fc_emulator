@@ -37,7 +37,7 @@ bool Emulator::insertCartridge(const std::string& filePath) {
 
 bool Emulator::stepFrame() {
 	while (!ppu_->isFrameComplete()) {
-		clock();
+		bus_->clock();
 	}
 	return true;                  // 帧已完成
 }
@@ -50,24 +50,16 @@ void Emulator::reset() {
 	controller2_->reset();
 }
 
-void Emulator::clock() {
-    cpu_->clock();
-
-    ppu_->clock();
-    ppu_->clock();
-    ppu_->clock();
-}
-
 // 
 const void Emulator::stepInstruction() {
 
 	// 空转
 	while (!cpu_->isComplete()) {
-		clock();
+		bus_->clock();
 	}
 
 	// 一个真的周期
-	clock();
+	bus_->clock();
 
 }
 
